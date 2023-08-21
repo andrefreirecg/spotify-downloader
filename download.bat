@@ -14,6 +14,8 @@ python3 -c "import pkgutil; exit(1 if pkgutil.find_loader('beautifulsoup4') else
     echo beautifulsoup4 já está instalado.
 ) || (
     python3 -m pip install BeautifulSoup4
+    python3 -m pip install bs4
+    python3 -m pip install requests
 )
 
 python3 -c "import pkgutil; exit(1 if pkgutil.find_loader('spotdl') else 0)" && (
