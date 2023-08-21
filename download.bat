@@ -31,6 +31,6 @@ python3 -c "import pkgutil; exit(1 if pkgutil.find_loader('ffmpeg-python') else 
 )
 
 REM Executa o arquivo Python
-python3 functions/index.py
+python3 ./functions/index.py
 
 pause
