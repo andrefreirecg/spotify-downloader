@@ -13,7 +13,7 @@ REM Verifica e instala as dependências
 python3 -c "import pkgutil; exit(1 if pkgutil.find_loader('beautifulsoup4') else 0)" && (
     echo beautifulsoup4 já está instalado.
 ) || (
-    python3 -m pip install beautifulsoup4
+    python3 -m pip install BeautifulSoup4
 )
 
 python3 -c "import pkgutil; exit(1 if pkgutil.find_loader('spotdl') else 0)" && (
