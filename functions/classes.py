@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import tkinter as tk
 from tkinter import messagebox, ttk, filedialog
 from bs4 import BeautifulSoup
@@ -8,6 +9,7 @@ import threading
 from functools import partial
 import subprocess
 import json
+import platform
 
 class LinkInput:
     def __init__(self, root):
@@ -315,24 +317,48 @@ class LinkInput:
         return 'playlist' in link.lower()
     
     def get_playlist_info(self, link):
-        """Obtém informações da playlist usando spotdl"""
+        """Obtém informações da playlist - tenta contar músicas"""
         try:
-            # Usar spotdl para obter informações da playlist
-            result = subprocess.run(
-                ['python3', '-m', 'spotdl', '--save-file', '-', link],
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
+            # Faz uma requisição para a página da playlist
+            response = requests.get(link, timeout=10)
+            content = response.text
             
-            if result.returncode == 0 and result.stdout:
-                # Contar linhas (cada linha é uma música)
-                tracks = result.stdout.strip().split('\n')
-                return len([t for t in tracks if t.strip()])
-            return 0
+            # Procura por padrões comuns que indicam o número de músicas
+            import re
+            # Padrão: busca por números seguidos de "songs"
+            song_pattern = r'(\d+)\s+songs?'
+            match = re.search(song_pattern, content, re.IGNORECASE)
+            
+            if match:
+                count = int(match.group(1))
+                return count
+            
+            # Padrão alternativo: busca por "track" seguido de número
+            track_patterns = [
+                r'track.*?(\d+)',
+                r'(\d+)\s+tracks?',
+            ]
+            
+            for pattern in track_patterns:
+                match = re.search(pattern, content, re.IGNORECASE)
+                if match:
+                    count = int(match.group(1))
+                    return count
+            
+            # Se não encontrou, retorna uma estimativa
+            # Para não quebrar o progresso, vamos usar uma estimativa baseada no tamanho da resposta
+            # Playlists pequenas têm ~100-200KB, playlists grandes têm ~500KB+
+            if len(content) > 500000:
+                return 100
+            elif len(content) > 300000:
+                return 50
+            else:
+                return 20
+                
         except Exception as e:
             print(f"Erro ao obter info da playlist: {e}")
-            return 0
+            # Retorna uma estimativa razoável
+            return 30
     
     def cancel_download_all(self):
         """Cancela o download em andamento"""
@@ -367,58 +393,99 @@ class LinkInput:
             # Verificar se é playlist
             is_playlist = self.is_playlist(link)
             
-            if is_playlist:
-                # Obter total de músicas
-                total = self.total_tracks[index]
-                if total == 0:
-                    total = self.get_playlist_info(link)
-                    self.total_tracks[index] = total
-                
-                # Baixar com progresso
-                original_dir = os.getcwd()
-                os.chdir(folder_name)
-                
-                # Usar subprocess para capturar a saída
-                process = subprocess.Popen(
-                    ['python3', '-m', 'spotdl', link],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1
-                )
-                
-                downloaded = 0
-                for line in process.stdout:
-                    if self.cancel_download:
-                        process.terminate()
-                        break
-                    if 'Downloading' in line or 'Downloaded' in line:
-                        downloaded += 1
-                        progress = int((downloaded / total) * 100) if total > 0 else 0
-                        progress_bar.config(mode='determinate', value=progress)
-                        self.current_track_info[index] = f"Baixando: {line.strip()}"
-                        self.root.after(0, lambda idx=index: progress_label.config(
-                            text=f"{self.current_track_info[idx] if idx < len(self.current_track_info) else ''}"
-                        ))
-                
-                process.wait()
-                os.chdir(original_dir)
-                
-                if not self.cancel_download:
-                    self.download_status[index] = True
-                    progress_bar.config(mode='determinate', value=100)
-                    progress_label.config(text="✓ Download concluído!")
+            # Obter total de músicas se for playlist
+            total = self.total_tracks[index]
+            if is_playlist and total == 0:
+                total = self.get_playlist_info(link)
+                self.total_tracks[index] = total
+            
+            # Baixar com monitoramento de arquivos
+            original_dir = os.getcwd()
+            os.chdir(folder_name)
+            
+            # Contar arquivos antes do download
+            files_before = len([f for f in os.listdir('.') if os.path.isfile(f)])
+            
+            # Detectar sistema operacional e ajustar comando
+            # Determinar comando python correto
+            python_cmd = 'python3' if platform.system() != 'Windows' else 'python'
+            
+            # Montar comando do spotdl
+            if platform.system() == 'Windows':
+                cmd = [python_cmd, '-m', 'spotdl', link]
             else:
-                # Não é playlist, usar método simples
-                original_dir = os.getcwd()
-                os.chdir(folder_name)
-                os.system(f'python3 -m spotdl {link}')
-                os.chdir(original_dir)
+                # Linux/Mac - verificar se ffmpeg está no path padrão
+                ffmpeg_path = '/usr/bin/ffmpeg'
+                if os.path.exists(ffmpeg_path):
+                    cmd = [python_cmd, '-m', 'spotdl', '--ffmpeg', ffmpeg_path, link]
+                else:
+                    # Tenta encontrar ffmpeg no PATH
+                    result = subprocess.run(['which', 'ffmpeg'], capture_output=True, text=True)
+                    if result.returncode == 0 and result.stdout.strip():
+                        ffmpeg_path = result.stdout.strip()
+                        cmd = [python_cmd, '-m', 'spotdl', '--ffmpeg', ffmpeg_path, link]
+                    else:
+                        cmd = [python_cmd, '-m', 'spotdl', link]
+            
+            # Usar subprocess para capturar a saída
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
+            )
+            
+            # Monitorar o progresso baseado em arquivos criados
+            import time
+            downloaded = 0
+            
+            def update_progress():
+                nonlocal downloaded
+                while True:
+                    if self.cancel_download:
+                        if process.poll() is None:
+                            process.terminate()
+                        break
+                    
+                    # Conta arquivos criados
+                    current_files = len([f for f in os.listdir('.') if os.path.isfile(f)])
+                    new_files = current_files - files_before
+                    
+                    if new_files > downloaded:
+                        downloaded = new_files
+                        if total > 0:
+                            progress = min(int((downloaded / total) * 100), 100)
+                            progress_bar.config(mode='determinate', value=progress)
+                            self.root.after(0, lambda idx=index, p=progress, d=downloaded: progress_label.config(
+                                text=f"Baixando... {d}/{total} músicas ({p}%)"
+                            ))
+                    
+                    # Verifica se o processo terminou
+                    if process.poll() is not None:
+                        break
+                    
+                    time.sleep(0.5)
                 
-                if not self.cancel_download:
-                    self.download_status[index] = True
-                    progress_bar.config(mode='determinate', value=100)
-                    progress_label.config(text="✓ Download concluído!")
+                # Garantir que chegue a 100%
+                progress_bar.config(mode='determinate', value=100)
+                self.root.after(0, lambda idx=index: progress_label.config(
+                    text="✓ Download concluído!"
+                ))
+            
+            # Inicia monitoramento em thread separada
+            monitor_thread = threading.Thread(target=update_progress, daemon=True)
+            monitor_thread.start()
+            
+            # Espera o processo terminar
+            process.wait()
+            monitor_thread.join(timeout=1)
+            
+            os.chdir(original_dir)
+            
+            if not self.cancel_download:
+                self.download_status[index] = True
+                progress_bar.config(mode='determinate', value=100)
             
         except Exception as e:
             if not self.cancel_download:
